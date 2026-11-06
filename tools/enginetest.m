@@ -18,6 +18,13 @@
 // --probe: a dedicated real-time thread that wakes every 1 ms and records how
 // late it was, to tell system-wide scheduling stalls from GCD/USB delivery ones.
 static _Atomic uint64_t gProbeMaxLate;
+
+static void midiIn(void *ctx, const uint8_t *b, size_t n) {
+    printf("MIDI in:");
+    for (size_t i = 0; i < n; i++) printf(" %02X", b[i]);
+    printf("\n");
+    fflush(stdout);
+}
 static void *probeThread(void *arg) {
     mach_timebase_info_data_t tb; mach_timebase_info(&tb);
     uint64_t ms = 1000000ull * tb.denom / tb.numer;
@@ -60,6 +67,7 @@ int main(int argc, const char *argv[]) {
         uint32_t rate = 48000, buf = 512;
         double seconds = 10, freq = 440, level = -24;
         const char *wavPath = NULL;
+        bool midi = false;
         double killAt = -1;
         for (int i = 1; i < argc; i++) {
             NSString *a = @(argv[i]);
@@ -72,11 +80,13 @@ int main(int argc, const char *argv[]) {
             else if ([a isEqualToString:@"--record"] && v) wavPath = argv[++i];
             else if ([a isEqualToString:@"--kill-at"] && v) killAt = atof(argv[++i]);
             else if ([a isEqualToString:@"--depth"] && v) setenv("US122_DEPTH", argv[++i], 1);
+            else if ([a isEqualToString:@"--midi"]) midi = true;
             else if ([a isEqualToString:@"--probe"]) { pthread_t th; pthread_create(&th, NULL, probeThread, NULL); }
             else { fprintf(stderr, "bad argument %s\n", argv[i]); return 64; }
         }
 
         US122EngineInit(NULL, NULL, NULL);
+        if (midi) US122EngineSetMidiInCallback(midiIn, NULL);
         for (int i = 0; i < 200 && !US122EngineIsPresent(); i++) usleep(10000);
         if (!US122EngineIsPresent()) { fprintf(stderr, "device not present\n"); return 1; }
         OSStatus st = US122EngineStart(rate);
@@ -159,6 +169,10 @@ int main(int argc, const char *argv[]) {
 
             if (now >= nextReport) {
                 nextReport += (uint64_t)ticksPerSec;
+                if (midi) { // note on + off, middle C
+                    static const uint8_t note[] = {0x90, 60, 100, 0x80, 60, 0};
+                    US122EngineMidiSend(note, sizeof note);
+                }
                 US122Stats stt;
                 US122EngineGetStats(&stt, true);
                 printf("pos %10.0f  rate %10.3f Hz  in %5.1f/%5.1f dBFS  gaps %llu resnap %llu resync %llu txerr %llu  late %llu  backwards %llu  zts-jitter %.1f us  maxgap %.1f ms  outlead %.1f ms  inlag %.1f ms  sublead %.2f ms  cmplat %.2f ms  probe %.2f ms  inlate %llu\n",

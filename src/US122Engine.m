@@ -40,6 +40,7 @@
 #include <math.h>
 #include <mach/mach.h>
 #include <mach/thread_policy.h>
+#include <os/lock.h>
 
 #define US122_VID 0x0644
 #define US122_PID 0x8021
@@ -47,6 +48,13 @@
 #define US122_ALT 1
 #define EP_IN 0x81
 #define EP_OUT 0x02
+#define EP_MIDI_IN 0x83   // bulk, 9-byte packets: up to 8 MIDI bytes padded with 0xFD
+#define EP_MIDI_OUT 0x04  // bulk, same framing plus a trailing 0xE0
+#define MIDI_PACKET 9
+#define MIDI_PAYLOAD 8
+#define MIDI_PAD 0xFD
+#define MIDI_IN_REQS 2
+#define MIDI_FIFO 4096
 #define BYTES_PER_FRAME 6
 #define UF_PER_REQ 8 // one 1 ms frame per request
 #define POOL 64           // request buffers per direction (covers long completion stalls)
@@ -87,6 +95,7 @@ static struct {
     _Atomic int live;       // capture data flowing in the current USB stream
     _Atomic int clockValid; // clock model usable (stays valid across automatic restarts)
     _Atomic int wantRunning;// host wants IO (set by Start, cleared by Stop)
+    _Atomic int keepAlive;  // keep streaming without host IO (MIDI only works while streaming)
     int depth, inSafetyMs;
 
     // watchdog / recovery
@@ -134,6 +143,17 @@ static struct {
     US122Stats lastLogged;
     double maxGapSinceLog;
     US122Stats st;
+
+    // MIDI (bulk pipes on the audio interface; completions on the io queue)
+    IOUSBHostPipe *midiInPipe, *midiOutPipe;
+    NSMutableData *midiInBuf[MIDI_IN_REQS], *midiOutBuf;
+    US122MidiInCallback midiCb;
+    void *midiCtx;
+    os_unfair_lock midiLock; // guards the out FIFO
+    uint8_t midiFifo[MIDI_FIFO];
+    uint32_t midiHead, midiTail; // FIFO indices (head = write)
+    int midiOutBusy;             // io queue only
+    uint64_t midiDropped;
 
     // published clock (seqlock)
     _Atomic uint32_t seq;
@@ -183,7 +203,11 @@ static ClockModel clockRead(void) {
 }
 
 static void watchdogTick(void);
+static void teardownLocked(void);
 static void primeDevice(void);
+static void midiStart(void);
+static void midiKick(void);
+static bool streamWanted(void) { return atomic_load(&E.wantRunning) || atomic_load(&E.keepAlive); }
 
 // ---------------------------------------------------------------- matching / hot-plug
 
@@ -214,6 +238,15 @@ static void onRemoved(void *ref, io_iterator_t it) {
     if (drain(it) && atomic_exchange(&E.present, 0)) {
         elog("device disconnected");
         if (E.presenceCb) E.presenceCb(E.presenceCtx, false);
+        dispatch_async(E.ctlQ, ^{
+            pthread_mutex_lock(&E.ctl);
+            if (E.intf && !atomic_load(&E.present)) {
+                teardownLocked();
+                atomic_store(&E.clockValid, 0);
+                elog("stopped (device gone)");
+            }
+            pthread_mutex_unlock(&E.ctl);
+        });
     }
 }
 
@@ -224,6 +257,7 @@ void US122EngineInit(US122PresenceCallback cb, void *ctx, US122LogCallback log) 
         E.presenceCtx = ctx;
         E.logCb = log;
         pthread_mutex_init(&E.ctl, NULL);
+        E.midiLock = OS_UNFAIR_LOCK_INIT;
         mach_timebase_info_data_t tb;
         mach_timebase_info(&tb);
         E.ticksPerNs = (double)tb.denom / tb.numer;
@@ -671,6 +705,93 @@ static void *pumpMain(void *arg) {
     return NULL;
 }
 
+// ---------------------------------------------------------------- MIDI (io queue)
+
+static void midiRead(int i) {
+    NSMutableData *buf = E.midiInBuf[i];
+    IOUSBHostPipe *pipe = E.midiInPipe;
+    if (!pipe || !buf || atomic_load(&E.stopping)) return;
+    atomic_fetch_add(&E.inflight, 1);
+    NSError *err = nil;
+    BOOL ok = [pipe enqueueIORequestWithData:buf completionTimeout:0 error:&err
+                           completionHandler:^(IOReturn st, NSUInteger n) {
+        atomic_fetch_sub(&E.inflight, 1);
+        if (st == kIOReturnAborted || deviceGone(st) || atomic_load(&E.stopping) || pipe != E.midiInPipe) return;
+        if (st == kIOReturnSuccess) {
+            const uint8_t *b = buf.bytes;
+            size_t len = 0;
+            while (len < n && len < MIDI_PAYLOAD && b[len] != MIDI_PAD) len++;
+            if (len && E.midiCb) E.midiCb(E.midiCtx, b, len);
+        } else {
+            elog("MIDI in: 0x%08x", st);
+            [pipe clearStallWithError:nil];
+        }
+        midiRead(i);
+    }];
+    if (!ok) {
+        atomic_fetch_sub(&E.inflight, 1);
+        elog("MIDI in enqueue: %s", err.localizedDescription.UTF8String);
+    }
+}
+
+static void midiStart(void) {
+    for (int i = 0; i < MIDI_IN_REQS; i++) midiRead(i);
+    midiKick(); // anything queued while the stream was down
+}
+
+static void midiKick(void) {
+    IOUSBHostPipe *pipe = E.midiOutPipe;
+    if (E.midiOutBusy || !pipe || !E.midiOutBuf || atomic_load(&E.stopping)) return;
+    uint8_t pkt[MIDI_PACKET];
+    uint32_t n = 0;
+    os_unfair_lock_lock(&E.midiLock);
+    while (n < MIDI_PAYLOAD && E.midiTail != E.midiHead) {
+        pkt[n++] = E.midiFifo[E.midiTail % MIDI_FIFO];
+        E.midiTail++;
+    }
+    os_unfair_lock_unlock(&E.midiLock);
+    if (!n) return;
+    memset(pkt + n, MIDI_PAD, MIDI_PAYLOAD - n);
+    pkt[MIDI_PAYLOAD] = 0xE0;
+    NSMutableData *buf = E.midiOutBuf;
+    memcpy(buf.mutableBytes, pkt, MIDI_PACKET);
+    E.midiOutBusy = 1;
+    atomic_fetch_add(&E.inflight, 1);
+    NSError *err = nil;
+    BOOL ok = [pipe enqueueIORequestWithData:buf completionTimeout:1.0 error:&err
+                           completionHandler:^(IOReturn st, NSUInteger sent) {
+        atomic_fetch_sub(&E.inflight, 1);
+        if (pipe != E.midiOutPipe) return;
+        E.midiOutBusy = 0;
+        if (st == kIOReturnAborted || deviceGone(st) || atomic_load(&E.stopping)) return;
+        if (st != kIOReturnSuccess) {
+            elog("MIDI out: 0x%08x", st);
+            [pipe clearStallWithError:nil];
+        }
+        midiKick();
+    }];
+    if (!ok) {
+        atomic_fetch_sub(&E.inflight, 1);
+        E.midiOutBusy = 0;
+        elog("MIDI out enqueue: %s", err.localizedDescription.UTF8String);
+    }
+}
+
+void US122EngineSetMidiInCallback(US122MidiInCallback cb, void *ctx) {
+    dispatch_sync(E.ioQ, ^{ E.midiCb = cb; E.midiCtx = ctx; });
+}
+
+void US122EngineMidiSend(const uint8_t *bytes, size_t len) {
+    os_unfair_lock_lock(&E.midiLock);
+    for (size_t i = 0; i < len; i++) {
+        if (E.midiHead - E.midiTail >= MIDI_FIFO) { E.midiDropped += len - i; break; }
+        E.midiFifo[E.midiHead % MIDI_FIFO] = bytes[i];
+        E.midiHead++;
+    }
+    os_unfair_lock_unlock(&E.midiLock);
+    dispatch_async(E.ioQ, ^{ midiKick(); });
+}
+
 // ---------------------------------------------------------------- start / stop
 
 static void stopPump(void) {
@@ -687,6 +808,8 @@ static void teardownLocked(void) {
     stopPump();
     [E.outPipe abortWithError:nil];
     [E.inPipe abortWithError:nil];
+    [E.midiInPipe abortWithError:nil];
+    [E.midiOutPipe abortWithError:nil];
     for (int i = 0; i < 200 && atomic_load(&E.inflight) > 0; i++) usleep(5000);
     if (atomic_load(&E.inflight) > 0) elog("teardown: %d requests still in flight", atomic_load(&E.inflight));
     [E.intf selectAlternateSetting:0 error:nil];
@@ -698,6 +821,10 @@ static void teardownLocked(void) {
         }
         E.outPipe = nil;
         E.inPipe = nil;
+        E.midiInPipe = E.midiOutPipe = nil;
+        for (int i = 0; i < MIDI_IN_REQS; i++) E.midiInBuf[i] = nil;
+        E.midiOutBuf = nil;
+        E.midiOutBusy = 0;
         E.intf = nil;
     });
     atomic_store(&E.inflight, 0);
@@ -739,6 +866,16 @@ static OSStatus startLocked(uint32_t rate, bool continueTimeline) {
     E.outMax = E.outPipe.descriptors->descriptor.wMaxPacketSize & 0x7ff;
     E.inMax = E.inPipe.descriptors->descriptor.wMaxPacketSize & 0x7ff;
     if (E.outMax < (rate / 8000 + 1) * BYTES_PER_FRAME) { elog("max packet %u too small", E.outMax); goto fail; }
+    {
+        NSError *merr = nil;
+        E.midiInPipe = [E.intf copyPipeWithAddress:EP_MIDI_IN error:&merr];
+        E.midiOutPipe = [E.intf copyPipeWithAddress:EP_MIDI_OUT error:&merr];
+        for (int i = 0; i < MIDI_IN_REQS && E.midiInPipe; i++)
+            E.midiInBuf[i] = [E.intf ioDataWithCapacity:MIDI_PACKET error:&merr];
+        E.midiOutBuf = E.midiOutPipe ? [E.intf ioDataWithCapacity:MIDI_PACKET error:&merr] : nil;
+        if (!E.midiInPipe || !E.midiOutPipe || !E.midiOutBuf)
+            elog("MIDI pipes unavailable: %s", merr.localizedDescription.UTF8String);
+    }
 
     {
         NSMutableData *d = [NSMutableData dataWithLength:3];
@@ -796,6 +933,7 @@ static OSStatus startLocked(uint32_t rate, bool continueTimeline) {
     for (int i = 0; i < 2000 && !atomic_load(&E.live); i++) usleep(1000);
     if (!atomic_load(&E.live)) { elog("no capture data within 2 s"); goto fail; }
     atomic_store(&E.running, 1);
+    dispatch_sync(E.ioQ, ^{ midiStart(); });
     elog("streaming at %u Hz", rate);
     goto out;
 
@@ -819,12 +957,31 @@ OSStatus US122EngineStart(uint32_t rate) {
 void US122EngineStop(void) {
     pthread_mutex_lock(&E.ctl);
     atomic_store(&E.wantRunning, 0);
-    if (E.intf) {
-        teardownLocked();
-        elog("stopped");
+    if (atomic_load(&E.keepAlive) && atomic_load(&E.present) && E.intf) {
+        // host IO stopped, but MIDI needs the stream: keep it (sending silence)
+    } else {
+        if (E.intf) {
+            teardownLocked();
+            elog("stopped");
+        }
+        atomic_store(&E.clockValid, 0);
     }
-    atomic_store(&E.clockValid, 0);
     pthread_mutex_unlock(&E.ctl);
+}
+
+void US122EngineSetKeepAlive(bool on) {
+    atomic_store(&E.keepAlive, on);
+    dispatch_async(E.ctlQ, ^{
+        pthread_mutex_lock(&E.ctl);
+        if (on && atomic_load(&E.present) && !E.intf) {
+            if (startLocked(E.rate ? E.rate : 48000, false) == kAudioHardwareNoError) elog("streaming for MIDI");
+        } else if (!on && !atomic_load(&E.wantRunning) && E.intf) {
+            teardownLocked();
+            atomic_store(&E.clockValid, 0);
+            elog("stopped");
+        }
+        pthread_mutex_unlock(&E.ctl);
+    });
 }
 
 // Watchdog (ctlQ, every 200 ms): if the host wants IO but no capture data has
@@ -832,7 +989,7 @@ void US122EngineStop(void) {
 // stream down and restart it on the same timeline. The clock model keeps
 // extrapolating meanwhile, so the HAL sees a dropout rather than an error.
 static void watchdogTick(void) {
-    if (!atomic_load(&E.wantRunning)) return;
+    if (!streamWanted()) return;
     uint64_t now = mach_absolute_time();
     double sinceMs = ((double)now - (double)atomic_load(&E.lastActivity)) / E.ticksPerNs / 1e6;
     bool healthy = E.intf && atomic_load(&E.running) && sinceMs < 300;
@@ -841,7 +998,7 @@ static void watchdogTick(void) {
     E.lastRecoverAttempt = now;
 
     pthread_mutex_lock(&E.ctl);
-    if (atomic_load(&E.wantRunning)) {
+    if (streamWanted() && atomic_load(&E.present)) {
         elog("stream stalled (%.0f ms without capture data); restarting", sinceMs);
         __block int64_t lastC = 0;
         bool haveTimeline = atomic_load(&E.clockValid);
@@ -865,7 +1022,10 @@ static void watchdogTick(void) {
 static void primeDevice(void) {
     usleep(300 * 1000); // let the device finish enumerating
     pthread_mutex_lock(&E.ctl);
-    if (!atomic_load(&E.wantRunning) && !E.intf && atomic_load(&E.present)) {
+    if (atomic_load(&E.keepAlive) && !E.intf && atomic_load(&E.present)) {
+        // MIDI keeps the stream running anyway, which also silences the device
+        if (startLocked(E.rate ? E.rate : 48000, false) == kAudioHardwareNoError) elog("streaming for MIDI");
+    } else if (!streamWanted() && !E.intf && atomic_load(&E.present)) {
         uint32_t rate = E.rate ? E.rate : 48000;
         if (startLocked(rate, false) == kAudioHardwareNoError) {
             usleep(300 * 1000);

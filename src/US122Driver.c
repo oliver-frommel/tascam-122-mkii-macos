@@ -6,6 +6,8 @@
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreMIDI/CoreMIDI.h>
+#include <mach/mach_time.h>
 #include <os/log.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -82,6 +84,112 @@ static bool LoadNumber(CFStringRef key, Float64 *out) {
         CFRelease(d);
     }
     return ok;
+}
+
+// ---------------------------------------------------------------- MIDI
+//
+// The device's 5-pin MIDI ports are published as CoreMIDI virtual endpoints
+// owned by this plug-in ("US-122MKII MIDI IN" is a source apps read from,
+// "US-122MKII MIDI OUT" a destination apps send to).
+
+static MIDIClientRef gMidiClient;
+static MIDIEndpointRef gMidiSrc, gMidiDst;
+
+// The device delivers a raw MIDI byte stream in chunks of up to 8 bytes, which
+// can split messages; CoreMIDI wants whole messages (or sysex fragments) per
+// packet. This parser runs on the engine's io queue only.
+static struct {
+    uint8_t status, buf[3];
+    int n, need;
+    bool sysex;
+    uint8_t sx[256];
+    int sxn;
+} gParse;
+
+static void MidiEmit(const uint8_t *b, int len) {
+    if (!gMidiSrc || len <= 0) return;
+    uint8_t mem[512];
+    MIDIPacketList *pl = (MIDIPacketList *)mem;
+    MIDIPacket *pk = MIDIPacketListInit(pl);
+    pk = MIDIPacketListAdd(pl, sizeof mem, pk, mach_absolute_time(), (ByteCount)len, b);
+    if (pk) MIDIReceived(gMidiSrc, pl);
+}
+
+static void FlushSysex(void) {
+    MidiEmit(gParse.sx, gParse.sxn);
+    gParse.sxn = 0;
+}
+
+static int DataBytes(uint8_t st) {
+    switch (st & 0xF0) {
+        case 0x80: case 0x90: case 0xA0: case 0xB0: case 0xE0: return 2;
+        case 0xC0: case 0xD0: return 1;
+    }
+    switch (st) {
+        case 0xF1: case 0xF3: return 1;
+        case 0xF2: return 2;
+        default: return 0;
+    }
+}
+
+static void MidiInCallback(void *ctx, const uint8_t *bytes, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        uint8_t b = bytes[i];
+        if (b >= 0xF8) { MidiEmit(&b, 1); continue; } // real-time: may appear anywhere
+        if (gParse.sysex) {
+            if (b < 0x80 || b == 0xF7) {
+                gParse.sx[gParse.sxn++] = b;
+                if (b == 0xF7) { FlushSysex(); gParse.sysex = false; }
+                else if (gParse.sxn == (int)sizeof gParse.sx) FlushSysex();
+                continue;
+            }
+            FlushSysex(); // unterminated sysex cut off by a new status byte
+            gParse.sysex = false;
+        }
+        if (b == 0xF0) { gParse.sysex = true; gParse.sxn = 0; gParse.sx[gParse.sxn++] = b; gParse.status = 0; continue; }
+        if (b >= 0x80) {
+            gParse.status = b;
+            gParse.n = 0;
+            gParse.need = DataBytes(b);
+            if (!gParse.need) { MidiEmit(&b, 1); gParse.status = 0; }
+            continue;
+        }
+        if (!gParse.status) continue; // stray data byte
+        gParse.buf[1 + gParse.n++] = b;
+        if (gParse.n == gParse.need) {
+            gParse.buf[0] = gParse.status;
+            MidiEmit(gParse.buf, 1 + gParse.need);
+            gParse.n = 0;
+            if (gParse.status >= 0xF0) gParse.status = 0; // system common: no running status
+        }
+    }
+}
+
+static void SetupMIDI(void) {
+    OSStatus st = MIDIClientCreateWithBlock(CFSTR("US-122MKII"), &gMidiClient, NULL);
+    if (st) { os_log_error(gLog, "MIDI: client create failed: %d", (int)st); return; }
+    st = MIDISourceCreate(gMidiClient, CFSTR("US-122MKII MIDI IN"), &gMidiSrc);
+    if (st) { os_log_error(gLog, "MIDI: source create failed: %d", (int)st); return; }
+    st = MIDIDestinationCreateWithBlock(gMidiClient, CFSTR("US-122MKII MIDI OUT"), &gMidiDst,
+                                        ^(const MIDIPacketList *pl, void *srcRef) {
+        const MIDIPacket *p = &pl->packet[0];
+        for (UInt32 i = 0; i < pl->numPackets; i++) {
+            US122EngineMidiSend(p->data, p->length);
+            p = MIDIPacketNext(p);
+        }
+    });
+    if (st) { os_log_error(gLog, "MIDI: destination create failed: %d", (int)st); return; }
+    // fixed IDs so apps remember the ports across restarts
+    MIDIObjectSetIntegerProperty(gMidiSrc, kMIDIPropertyUniqueID, 0x3A122101);
+    MIDIObjectSetIntegerProperty(gMidiDst, kMIDIPropertyUniqueID, 0x3A122102);
+    MIDIEndpointRef eps[2] = {gMidiSrc, gMidiDst};
+    for (int i = 0; i < 2; i++) {
+        MIDIObjectSetStringProperty(eps[i], kMIDIPropertyManufacturer, CFSTR("TASCAM"));
+        MIDIObjectSetStringProperty(eps[i], kMIDIPropertyModel, CFSTR("US-122MKII"));
+    }
+    US122EngineSetMidiInCallback(MidiInCallback, NULL);
+    US122EngineSetKeepAlive(true);
+    os_log(gLog, "MIDI: ports published");
 }
 
 // ---------------------------------------------------------------- engine callbacks
@@ -384,6 +492,7 @@ static OSStatus Initialize(AudioServerPlugInDriverRef drv, AudioServerPlugInHost
     if (LoadNumber(kKeyMute, &v)) atomic_store(&gMute, v != 0);
     if (LoadNumber(kKeyRate, &v) && US122EngineIsSupportedRate((uint32_t)v)) gSampleRate = v;
     US122EngineInit(PresenceCallback, NULL, LogCallback);
+    SetupMIDI();
     os_log(gLog, "initialised; device %{public}s, volume %.2f%{public}s, %.0f Hz",
            US122EngineIsPresent() ? "present" : "absent", atomic_load(&gVolumeScalar),
            atomic_load(&gMute) ? " (muted)" : "", gSampleRate);

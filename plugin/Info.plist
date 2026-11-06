@@ -32,6 +32,11 @@
 			<string>BCC94FED-2E9B-4AF6-9C52-C452FF0565CF</string>
 		</array>
 	</dict>
+	<key>AudioServerPlugIn_MachServices</key>
+	<array>
+		<string>com.apple.midiserver</string>
+		<string>com.apple.midiserver.io</string>
+	</array>
 	<key>AudioServerPlugIn_IOKitUserClients</key>
 	<array>
 		<string>AppleUSBHostFrameworkInterfaceClient</string>

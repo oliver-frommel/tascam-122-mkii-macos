@@ -1,5 +1,6 @@
 CFLAGS = -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=12.0
 FRAMEWORKS = -framework Foundation -framework IOKit -framework IOUSBHost -framework CoreAudio -framework CoreFoundation
+DRIVER_FRAMEWORKS = $(FRAMEWORKS) -framework CoreMIDI
 
 DRIVER = build/US122MKII.driver
 HAL_DIR = /Library/Audio/Plug-Ins/HAL
@@ -22,7 +23,7 @@ $(DRIVER): src/US122Driver.c src/US122Engine.m src/US122Engine.h plugin/Info.pli
 	@mkdir -p $(DRIVER)/Contents/MacOS
 	cp plugin/Info.plist $(DRIVER)/Contents/Info.plist
 	clang $(CFLAGS) -bundle -fvisibility=hidden -o $(DRIVER)/Contents/MacOS/US122MKII \
-		src/US122Driver.c src/US122Engine.m $(FRAMEWORKS)
+		src/US122Driver.c src/US122Engine.m $(DRIVER_FRAMEWORKS)
 	codesign --force --sign - $(DRIVER)
 
 # needs root: sudo make install (run plain `make` first; install never builds, so build/ stays user-owned)
