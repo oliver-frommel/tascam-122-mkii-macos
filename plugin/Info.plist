@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>US122MKII</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.us122mkii.driver</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>US122MKII</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>CFPlugInFactories</key>
+	<dict>
+		<key>BCC94FED-2E9B-4AF6-9C52-C452FF0565CF</key>
+		<string>US122_Create</string>
+	</dict>
+	<key>CFPlugInTypes</key>
+	<dict>
+		<key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+		<array>
+			<string>BCC94FED-2E9B-4AF6-9C52-C452FF0565CF</string>
+		</array>
+	</dict>
+	<key>AudioServerPlugIn_IOKitUserClients</key>
+	<array>
+		<string>AppleUSBHostFrameworkInterfaceClient</string>
+		<string>AppleUSBHostFrameworkDeviceClient</string>
+	</array>
+</dict>
+</plist>
