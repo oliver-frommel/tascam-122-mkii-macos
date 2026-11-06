@@ -86,6 +86,7 @@ and real-time wake-up jitter.
 
 - [x] Playback and capture at 44.1/48/88.2/96 kHz
 - [x] Capture verified with a real source (guitar on input R, 48 kHz)
+- [x] Sample-rate switching while playing (~130 ms gap per switch)
 - [x] Core Audio device with hot-plug
 - [x] Output volume/mute (software gain), persisted with the sample rate
 - [x] Empty/late capture packets treated as lost
