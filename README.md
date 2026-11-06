@@ -94,4 +94,9 @@ and real-time wake-up jitter.
 - [x] Real-time pump threads decoupled from completion delivery
 - [ ] Long soak (10 min+) through Core Audio with the pump build
 - [ ] Lower latency: limited by kernel enqueue stalls (see above); 16 ms output lead
-- [ ] MIDI (bulk EP 0x83 in / 0x04 out)
+- [x] Silences the device's power-up noise: configures it (alt setting +
+      rate) within a few ms of connect
+- [ ] MIDI: parked. USB transport works (`enginetest --midi`) and CoreMIDI
+      ports are coded, but the Core Audio helper's sandbox refuses CoreMIDI
+      clients (-10833). Needs a relay process in the user session, plus 5-pin
+      gear to test with.

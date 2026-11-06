@@ -1019,22 +1019,44 @@ static void watchdogTick(void) {
 // After power-up the US-122MKII puts out a loud sweeping noise until it has
 // received its first audio stream; afterwards it stays quiet even when idle.
 // So on every connect, stream a moment of silence unless IO is already wanted.
+// After power-up the US-122MKII puts out a loud sweeping noise until it is
+// configured. Selecting the streaming alt setting and setting the sample rate
+// is enough (no audio stream needed), and takes a few ms, so do it right on
+// connect. Streaming instead took ~2 s because the bus is busy after plug-in.
 static void primeDevice(void) {
-    usleep(300 * 1000); // let the device finish enumerating
     pthread_mutex_lock(&E.ctl);
-    if (atomic_load(&E.keepAlive) && !E.intf && atomic_load(&E.present)) {
-        // MIDI keeps the stream running anyway, which also silences the device
-        if (startLocked(E.rate ? E.rate : 48000, false) == kAudioHardwareNoError) elog("streaming for MIDI");
-    } else if (!streamWanted() && !E.intf && atomic_load(&E.present)) {
+    if (!streamWanted() && !E.intf && atomic_load(&E.present)) {
         uint32_t rate = E.rate ? E.rate : 48000;
-        if (startLocked(rate, false) == kAudioHardwareNoError) {
-            usleep(300 * 1000);
-            teardownLocked();
-            atomic_store(&E.clockValid, 0);
-            elog("primed device at %u Hz", rate);
-        } else {
-            elog("priming the device failed");
+        uint64_t t0 = mach_absolute_time();
+#define SINCE() ((double)(mach_absolute_time() - t0) / E.ticksPerNs / 1e6)
+        NSError *err = nil;
+        IOUSBHostInterface *intf = nil;
+        for (int attempt = 0; attempt < 20 && !intf; attempt++) {
+            if (attempt) usleep(50 * 1000);
+            io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, matchDict());
+            if (!svc) break;
+            intf = [[IOUSBHostInterface alloc] initWithIOService:svc options:0 queue:E.ioQ error:&err interestHandler:nil];
+            IOObjectRelease(svc);
         }
+        if (!intf) {
+            elog("prime: open failed: %s", err.localizedDescription.UTF8String);
+        } else {
+            double tOpen = SINCE();
+            BOOL alt = [intf selectAlternateSetting:US122_ALT error:&err];
+            double tAlt = SINCE();
+            NSMutableData *d = [NSMutableData dataWithLength:3];
+            uint8_t *p = d.mutableBytes;
+            p[0] = rate & 0xff; p[1] = (rate >> 8) & 0xff; p[2] = (rate >> 16) & 0xff;
+            IOUSBDeviceRequest req = {.bmRequestType = 0x22, .bRequest = 0x01, .wValue = 0x0100,
+                                      .wIndex = EP_IN, .wLength = 3};
+            BOOL rateOk = [intf sendDeviceRequest:req data:d bytesTransferred:NULL completionTimeout:1.0 error:&err];
+            double tRate = SINCE();
+            [intf selectAlternateSetting:0 error:nil];
+            [intf destroy];
+            elog("primed device (config only): open %.0f ms, alt setting %s at %.0f ms, rate %u %s at %.0f ms",
+                 tOpen, alt ? "ok" : "FAILED", tAlt, rate, rateOk ? "ok" : "FAILED", tRate);
+        }
+#undef SINCE
     }
     pthread_mutex_unlock(&E.ctl);
 }

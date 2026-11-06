@@ -167,7 +167,9 @@ static void MidiInCallback(void *ctx, const uint8_t *bytes, size_t len) {
 
 static void SetupMIDI(void) {
     OSStatus st = MIDIClientCreateWithBlock(CFSTR("US-122MKII"), &gMidiClient, NULL);
-    if (st) { os_log_error(gLog, "MIDI: client create failed: %d", (int)st); return; }
+    // -10833 (kMIDINotPermitted): the Core Audio helper's sandbox doesn't allow
+    // CoreMIDI clients. MIDI is parked until there is a user-session relay.
+    if (st) { os_log(gLog, "MIDI unavailable (client create: %d)", (int)st); return; }
     st = MIDISourceCreate(gMidiClient, CFSTR("US-122MKII MIDI IN"), &gMidiSrc);
     if (st) { os_log_error(gLog, "MIDI: source create failed: %d", (int)st); return; }
     st = MIDIDestinationCreateWithBlock(gMidiClient, CFSTR("US-122MKII MIDI OUT"), &gMidiDst,
