@@ -183,6 +183,7 @@ static ClockModel clockRead(void) {
 }
 
 static void watchdogTick(void);
+static void primeDevice(void);
 
 // ---------------------------------------------------------------- matching / hot-plug
 
@@ -205,6 +206,7 @@ static void onAdded(void *ref, io_iterator_t it) {
     if (drain(it) && !atomic_exchange(&E.present, 1)) {
         elog("device connected");
         if (E.presenceCb) E.presenceCb(E.presenceCtx, true);
+        dispatch_async(E.ctlQ, ^{ primeDevice(); });
     }
 }
 
@@ -853,6 +855,26 @@ static void watchdogTick(void) {
         }
         OSStatus st = startLocked(E.rate, haveTimeline);
         if (st) elog("restart failed (%d); will retry", (int)st);
+    }
+    pthread_mutex_unlock(&E.ctl);
+}
+
+// After power-up the US-122MKII puts out a loud sweeping noise until it has
+// received its first audio stream; afterwards it stays quiet even when idle.
+// So on every connect, stream a moment of silence unless IO is already wanted.
+static void primeDevice(void) {
+    usleep(300 * 1000); // let the device finish enumerating
+    pthread_mutex_lock(&E.ctl);
+    if (!atomic_load(&E.wantRunning) && !E.intf && atomic_load(&E.present)) {
+        uint32_t rate = E.rate ? E.rate : 48000;
+        if (startLocked(rate, false) == kAudioHardwareNoError) {
+            usleep(300 * 1000);
+            teardownLocked();
+            atomic_store(&E.clockValid, 0);
+            elog("primed device at %u Hz", rate);
+        } else {
+            elog("priming the device failed");
+        }
     }
     pthread_mutex_unlock(&E.ctl);
 }
