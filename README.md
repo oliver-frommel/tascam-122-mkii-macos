@@ -4,6 +4,10 @@ Userspace driver for the TASCAM US-122MKII (USB `0644:8021`). No kernel
 extension and no SIP changes: it talks to the device through Apple's
 IOUSBHost framework.
 
+## Motivation
+
+The Tascam US-122MKII is a capable USB Audio/MIDI interface but it's not "class compliant" therefore won't work without a special driver. The latest drivers for macOS are for version 10.14. This driver makes the device work on modern macOS.
+
 ## Protocol
 
 Taken from serifpersia's Linux driver
