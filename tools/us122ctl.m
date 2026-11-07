@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Oliver Frommel
+
 // us122ctl — userspace test tool for the TASCAM US-122MKII on macOS.
 //
 // Talks to the device directly through IOUSBHost (no kernel driver).

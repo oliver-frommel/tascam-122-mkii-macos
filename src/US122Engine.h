@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Oliver Frommel
+
 // US122Engine — userspace USB audio engine for the TASCAM US-122MKII.
 //
 // Owns the device (via IOUSBHost), streams isochronous audio in both

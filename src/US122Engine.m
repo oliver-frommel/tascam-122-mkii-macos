@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Oliver Frommel
+
 // US122Engine — see US122Engine.h.
 //
 // Clocking

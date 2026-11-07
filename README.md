@@ -102,3 +102,15 @@ and real-time wake-up jitter.
       ports are coded, but the Core Audio helper's sandbox refuses CoreMIDI
       clients (-10833). Needs a relay process in the user session, plus 5-pin
       gear to test with.
+
+## License
+
+Copyright (C) 2026 Oliver Frommel
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE) for the full text.
+
+The Linux driver [us144mkii](https://github.com/serifpersia/us144mkii) was used
+as a reference for the device protocol only; no code was taken from it.

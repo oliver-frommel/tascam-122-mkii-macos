@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Oliver Frommel
+
 // enginetest — drives US122Engine the way the Core Audio HAL would:
 // an IO "cycle" every buffer period that writes output ahead of the device
 // position (output safety offset) and reads input behind it (input safety

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Oliver Frommel
+
 // US122Driver — AudioServerPlugIn exposing the TASCAM US-122MKII to Core Audio.
 //
 // Object tree:  PlugIn (1) -> Device (2) -> Input stream (3), Output stream (4)

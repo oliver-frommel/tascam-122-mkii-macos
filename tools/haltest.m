@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Oliver Frommel
+
 // haltest — exercises the installed US-122MKII Core Audio device through the
 // HAL (AudioDeviceIOProc): plays a sine, measures input level and checks the
 // IO timeline for discontinuities (skipped/overloaded cycles).
