@@ -106,10 +106,11 @@ and real-time wake-up jitter.
 - [ ] Lower latency: limited by kernel enqueue stalls (see above); 16 ms output lead
 - [x] Silences the device's power-up noise: configures it (alt setting +
       rate) within a few ms of connect
-- [ ] MIDI: parked. USB transport works (`enginetest --midi`) and CoreMIDI
-      ports are coded, but the Core Audio helper's sandbox refuses CoreMIDI
-      clients (-10833). Needs a relay process in the user session, plus 5-pin
-      gear to test with.
+- [ ] MIDI: device transport verified by loopback (MIDI OUT cabled to MIDI
+      IN, `enginetest --midi`): note messages and 1500-byte bursts arrive
+      intact. The device transmits only the first 4 bytes of each OUT packet.
+      Not yet visible to apps: the Core Audio helper's sandbox refuses CoreMIDI
+      clients (-10833), so the ports need a relay outside the sandbox.
 
 ## License
 

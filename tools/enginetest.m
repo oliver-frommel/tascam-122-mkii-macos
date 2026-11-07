@@ -7,7 +7,10 @@
 // offset), using only the engine's clock model.
 //
 //   enginetest [--rate 48000] [--seconds 10] [--freq 440] [--level -24]
-//              [--buffer 512] [--record in.wav]
+//              [--buffer 512] [--record in.wav] [--midi]
+//
+// --midi prints MIDI input and sends a note on/off every second (or the hex
+// bytes in $ET_MIDI_MSG). With MIDI OUT cabled to MIDI IN this is a loopback test.
 
 #import <Foundation/Foundation.h>
 #include <mach/mach_time.h>
@@ -174,6 +177,16 @@ int main(int argc, const char *argv[]) {
                 nextReport += (uint64_t)ticksPerSec;
                 if (midi) { // note on + off, middle C
                     static const uint8_t note[] = {0x90, 60, 100, 0x80, 60, 0};
+                    const char *hex = getenv("ET_MIDI_MSG"); // hex bytes to send instead, e.g. "F0 7E 7F 06 01 F7"
+                    if (hex) {
+                        static uint8_t m[4096]; size_t k = 0; char *e;
+                        for (const char *p = hex; *p && k < sizeof m; p = e) {
+                            unsigned long v = strtoul(p, &e, 16);
+                            if (e == p) break;
+                            m[k++] = (uint8_t)v;
+                        }
+                        US122EngineMidiSend(m, k);
+                    } else
                     US122EngineMidiSend(note, sizeof note);
                 }
                 US122Stats stt;

@@ -51,8 +51,10 @@
 #define US122_ALT 1
 #define EP_IN 0x81
 #define EP_OUT 0x02
-#define EP_MIDI_IN 0x83   // bulk, 9-byte packets: up to 8 MIDI bytes padded with 0xFD
-#define EP_MIDI_OUT 0x04  // bulk, same framing plus a trailing 0xE0
+#define EP_MIDI_IN 0x83   // bulk, 9-byte packets: MIDI bytes padded with 0xFD (device sends 1-3 per packet)
+#define EP_MIDI_OUT 0x04  // bulk, 9-byte packets ending in 0xE0, but only the first
+                          // 4 bytes are transmitted (measured by loopback); rest 0xFD
+#define MIDI_OUT_PAYLOAD 4
 #define MIDI_PACKET 9
 #define MIDI_PAYLOAD 8
 #define MIDI_PAD 0xFD
@@ -748,7 +750,7 @@ static void midiKick(void) {
     uint8_t pkt[MIDI_PACKET];
     uint32_t n = 0;
     os_unfair_lock_lock(&E.midiLock);
-    while (n < MIDI_PAYLOAD && E.midiTail != E.midiHead) {
+    while (n < MIDI_OUT_PAYLOAD && E.midiTail != E.midiHead) {
         pkt[n++] = E.midiFifo[E.midiTail % MIDI_FIFO];
         E.midiTail++;
     }
