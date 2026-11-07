@@ -19,9 +19,10 @@ build/haltest: tools/haltest.m
 	@mkdir -p build
 	clang $(CFLAGS) -o $@ $< -framework Foundation -framework CoreAudio
 
-$(DRIVER): src/US122Driver.c src/US122Engine.m src/US122Engine.h plugin/Info.plist
-	@mkdir -p $(DRIVER)/Contents/MacOS
+$(DRIVER): src/US122Driver.c src/US122Engine.m src/US122Engine.h plugin/Info.plist plugin/US122MKII.icns
+	@mkdir -p $(DRIVER)/Contents/MacOS $(DRIVER)/Contents/Resources
 	cp plugin/Info.plist $(DRIVER)/Contents/Info.plist
+	cp plugin/US122MKII.icns $(DRIVER)/Contents/Resources/
 	clang $(CFLAGS) -bundle -fvisibility=hidden -o $(DRIVER)/Contents/MacOS/US122MKII \
 		src/US122Driver.c src/US122Engine.m $(DRIVER_FRAMEWORKS)
 	codesign --force --sign - $(DRIVER)
@@ -40,4 +41,9 @@ uninstall:
 clean:
 	rm -rf build
 
-.PHONY: all clean install uninstall
+# regenerate the device icon (needs swift; the .icns is checked in)
+icon:
+	swift tools/makeicon.swift build/US122MKII.iconset
+	iconutil -c icns build/US122MKII.iconset -o plugin/US122MKII.icns
+
+.PHONY: all clean install uninstall icon

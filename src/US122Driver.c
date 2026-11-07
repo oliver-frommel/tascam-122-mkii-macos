@@ -240,6 +240,11 @@ static AudioStreamBasicDescription CurrentFormat(void) {
     };
 }
 
+static CFURLRef CopyIconURL(void) {
+    CFBundleRef b = CFBundleGetBundleWithIdentifier(CFSTR("local.us122mkii.driver"));
+    return b ? CFBundleCopyResourceURL(b, CFSTR("US122MKII"), CFSTR("icns"), NULL) : NULL;
+}
+
 static bool IsStream(AudioObjectID o) { return o == kObjectID_StreamIn || o == kObjectID_StreamOut; }
 static bool IsControl(AudioObjectID o) { return o == kObjectID_Volume || o == kObjectID_Mute; }
 static bool ValidObject(AudioObjectID o) { return o == kObjectID_PlugIn || o == kObjectID_Device || IsStream(o) || IsControl(o); }
@@ -289,6 +294,7 @@ static OSStatus GetProp(AudioObjectID obj, const AudioObjectPropertyAddress *a, 
             RET_SCALAR(AudioObjectID, r);
         }
         case kAudioPlugInPropertyResourceBundle: RET_SCALAR(CFStringRef, CFSTR(""));
+        case kAudioObjectPropertyName: RET_SCALAR(CFStringRef, CFSTR("US-122MKII"));
         }
         break;
 
@@ -298,8 +304,24 @@ static OSStatus GetProp(AudioObjectID obj, const AudioObjectPropertyAddress *a, 
         case kAudioObjectPropertyBaseClass: RET_SCALAR(AudioClassID, kAudioObjectClassID);
         case kAudioObjectPropertyClass: RET_SCALAR(AudioClassID, kAudioDeviceClassID);
         case kAudioObjectPropertyOwner: RET_SCALAR(AudioObjectID, kObjectID_PlugIn);
-        case kAudioObjectPropertyName: RET_SCALAR(CFStringRef, CFSTR("US-122MKII"));
+        case kAudioObjectPropertyName: RET_SCALAR(CFStringRef, CFSTR("TASCAM US-122MKII"));
         case kAudioObjectPropertyManufacturer: RET_SCALAR(CFStringRef, CFSTR("TASCAM"));
+        case kAudioObjectPropertyElementName: {
+            // channel names as printed on the panel
+            static const CFStringRef inNames[] = {CFSTR("In L (Mic/Line)"), CFSTR("In R (Mic/Line/Guitar)")};
+            static const CFStringRef outNames[] = {CFSTR("Out L"), CFSTR("Out R")};
+            if ((!in && !out) || a->mElement < 1 || a->mElement > 2) return kAudioHardwareUnknownPropertyError;
+            RET_SCALAR(CFStringRef, (in ? inNames : outNames)[a->mElement - 1]);
+        }
+        case kAudioDevicePropertyIcon: {
+            if (!outData) { *outDataSize = sizeof(CFURLRef); return kAudioHardwareNoError; }
+            if (inDataSize < sizeof(CFURLRef)) return kAudioHardwareBadPropertySizeError;
+            CFURLRef url = CopyIconURL();
+            if (!url) return kAudioHardwareUnspecifiedError;
+            *(CFURLRef *)outData = url; // the caller releases it
+            *outDataSize = sizeof(CFURLRef);
+            return kAudioHardwareNoError;
+        }
         case kAudioDevicePropertyDeviceUID: RET_SCALAR(CFStringRef, CFSTR(kDeviceUID));
         case kAudioDevicePropertyModelUID: RET_SCALAR(CFStringRef, CFSTR(kModelUID));
         case kAudioDevicePropertyConfigurationApplication: RET_SCALAR(CFStringRef, CFSTR("com.apple.audio.AudioMIDISetup"));
