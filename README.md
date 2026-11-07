@@ -8,6 +8,10 @@ IOUSBHost framework.
 
 The Tascam US-122MKII is a capable USB Audio/MIDI interface but it's not "class compliant" therefore won't work without a special driver. The latest drivers for macOS are for version 10.14. This driver makes the device work on modern macOS.
 
+## AI policy
+
+This was purely vibe coded with an LLM.
+
 ## Protocol
 
 Taken from serifpersia's Linux driver
