@@ -9,9 +9,9 @@
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
-#include <CoreMIDI/CoreMIDI.h>
 #include <mach/mach_time.h>
 #include <os/log.h>
+#include <xpc/xpc.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <math.h>
@@ -91,110 +91,66 @@ static bool LoadNumber(CFStringRef key, Float64 *out) {
 
 // ---------------------------------------------------------------- MIDI
 //
-// The device's 5-pin MIDI ports are published as CoreMIDI virtual endpoints
-// owned by this plug-in ("US-122MKII MIDI IN" is a source apps read from,
-// "US-122MKII MIDI OUT" a destination apps send to).
+// Core Audio's sandbox doesn't let this plug-in use CoreMIDI, so the MIDI
+// ports are published by a separate CoreMIDI driver (midi/US122MIDIDriver.c)
+// running in the user's MIDIServer. MIDI bytes travel between it and us through
+// the us122-midirelay launchd daemon (midi/relay.c), the one service both
+// sandboxes can reach. The device only passes MIDI while audio streams, so the
+// MIDI driver runs a silent Core Audio stream on this device while MIDI is used.
 
-static MIDIClientRef gMidiClient;
-static MIDIEndpointRef gMidiSrc, gMidiDst;
+#define RELAY_SERVICE "local.us122mkii.midirelay"
 
-// The device delivers a raw MIDI byte stream in chunks of up to 8 bytes, which
-// can split messages; CoreMIDI wants whole messages (or sysex fragments) per
-// packet. This parser runs on the engine's io queue only.
-static struct {
-    uint8_t status, buf[3];
-    int n, need;
-    bool sysex;
-    uint8_t sx[256];
-    int sxn;
-} gParse;
+static dispatch_queue_t gRelayQ;
+static xpc_connection_t gRelay; // gRelayQ
 
-static void MidiEmit(const uint8_t *b, int len) {
-    if (!gMidiSrc || len <= 0) return;
-    uint8_t mem[512];
-    MIDIPacketList *pl = (MIDIPacketList *)mem;
-    MIDIPacket *pk = MIDIPacketListInit(pl);
-    pk = MIDIPacketListAdd(pl, sizeof mem, pk, mach_absolute_time(), (ByteCount)len, b);
-    if (pk) MIDIReceived(gMidiSrc, pl);
+static void RelaySendPresent(bool present) {
+    xpc_object_t m = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_bool(m, "present", present);
+    dispatch_async(gRelayQ, ^{ if (gRelay) xpc_connection_send_message(gRelay, m); });
 }
 
-static void FlushSysex(void) {
-    MidiEmit(gParse.sx, gParse.sxn);
-    gParse.sxn = 0;
+static void RelayHello(void) {
+    xpc_object_t m = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_string(m, "role", "audio");
+    xpc_connection_send_message(gRelay, m);
+    m = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_bool(m, "present", US122EngineIsPresent());
+    xpc_connection_send_message(gRelay, m);
 }
 
-static int DataBytes(uint8_t st) {
-    switch (st & 0xF0) {
-        case 0x80: case 0x90: case 0xA0: case 0xB0: case 0xE0: return 2;
-        case 0xC0: case 0xD0: return 1;
-    }
-    switch (st) {
-        case 0xF1: case 0xF3: return 1;
-        case 0xF2: return 2;
-        default: return 0;
-    }
+static void RelayConnect(void) {
+    if (gRelay) return;
+    xpc_connection_t c = xpc_connection_create_mach_service(RELAY_SERVICE, gRelayQ, XPC_CONNECTION_MACH_SERVICE_PRIVILEGED);
+    gRelay = c;
+    xpc_connection_set_event_handler(c, ^(xpc_object_t msg) {
+        if (xpc_get_type(msg) == XPC_TYPE_DICTIONARY) {
+            size_t n = 0;
+            const void *out = xpc_dictionary_get_data(msg, "out", &n);
+            if (out && n) US122EngineMidiSend(out, n);
+        } else if (msg == XPC_ERROR_CONNECTION_INTERRUPTED) {
+            RelayHello(); // relay restarted
+        } else if (msg == XPC_ERROR_CONNECTION_INVALID) {
+            // relay not installed (or rejected us): MIDI unavailable, retry occasionally
+            os_log(gLog, "MIDI relay unavailable");
+            gRelay = NULL;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), gRelayQ, ^{ RelayConnect(); });
+        }
+    });
+    xpc_connection_resume(c);
+    RelayHello();
 }
 
+// engine io queue: raw bytes from the device's MIDI IN jack
 static void MidiInCallback(void *ctx, const uint8_t *bytes, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        uint8_t b = bytes[i];
-        if (b >= 0xF8) { MidiEmit(&b, 1); continue; } // real-time: may appear anywhere
-        if (gParse.sysex) {
-            if (b < 0x80 || b == 0xF7) {
-                gParse.sx[gParse.sxn++] = b;
-                if (b == 0xF7) { FlushSysex(); gParse.sysex = false; }
-                else if (gParse.sxn == (int)sizeof gParse.sx) FlushSysex();
-                continue;
-            }
-            FlushSysex(); // unterminated sysex cut off by a new status byte
-            gParse.sysex = false;
-        }
-        if (b == 0xF0) { gParse.sysex = true; gParse.sxn = 0; gParse.sx[gParse.sxn++] = b; gParse.status = 0; continue; }
-        if (b >= 0x80) {
-            gParse.status = b;
-            gParse.n = 0;
-            gParse.need = DataBytes(b);
-            if (!gParse.need) { MidiEmit(&b, 1); gParse.status = 0; }
-            continue;
-        }
-        if (!gParse.status) continue; // stray data byte
-        gParse.buf[1 + gParse.n++] = b;
-        if (gParse.n == gParse.need) {
-            gParse.buf[0] = gParse.status;
-            MidiEmit(gParse.buf, 1 + gParse.need);
-            gParse.n = 0;
-            if (gParse.status >= 0xF0) gParse.status = 0; // system common: no running status
-        }
-    }
+    xpc_object_t m = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_data(m, "in", bytes, len);
+    dispatch_async(gRelayQ, ^{ if (gRelay) xpc_connection_send_message(gRelay, m); });
 }
 
 static void SetupMIDI(void) {
-    OSStatus st = MIDIClientCreateWithBlock(CFSTR("US-122MKII"), &gMidiClient, NULL);
-    // -10833 (kMIDINotPermitted): the Core Audio helper's sandbox doesn't allow
-    // CoreMIDI clients. MIDI is parked until there is a user-session relay.
-    if (st) { os_log(gLog, "MIDI unavailable (client create: %d)", (int)st); return; }
-    st = MIDISourceCreate(gMidiClient, CFSTR("US-122MKII MIDI IN"), &gMidiSrc);
-    if (st) { os_log_error(gLog, "MIDI: source create failed: %d", (int)st); return; }
-    st = MIDIDestinationCreateWithBlock(gMidiClient, CFSTR("US-122MKII MIDI OUT"), &gMidiDst,
-                                        ^(const MIDIPacketList *pl, void *srcRef) {
-        const MIDIPacket *p = &pl->packet[0];
-        for (UInt32 i = 0; i < pl->numPackets; i++) {
-            US122EngineMidiSend(p->data, p->length);
-            p = MIDIPacketNext(p);
-        }
-    });
-    if (st) { os_log_error(gLog, "MIDI: destination create failed: %d", (int)st); return; }
-    // fixed IDs so apps remember the ports across restarts
-    MIDIObjectSetIntegerProperty(gMidiSrc, kMIDIPropertyUniqueID, 0x3A122101);
-    MIDIObjectSetIntegerProperty(gMidiDst, kMIDIPropertyUniqueID, 0x3A122102);
-    MIDIEndpointRef eps[2] = {gMidiSrc, gMidiDst};
-    for (int i = 0; i < 2; i++) {
-        MIDIObjectSetStringProperty(eps[i], kMIDIPropertyManufacturer, CFSTR("TASCAM"));
-        MIDIObjectSetStringProperty(eps[i], kMIDIPropertyModel, CFSTR("US-122MKII"));
-    }
+    gRelayQ = dispatch_queue_create("local.us122mkii.midirelay", DISPATCH_QUEUE_SERIAL);
     US122EngineSetMidiInCallback(MidiInCallback, NULL);
-    US122EngineSetKeepAlive(true);
-    os_log(gLog, "MIDI: ports published");
+    dispatch_async(gRelayQ, ^{ RelayConnect(); });
 }
 
 // ---------------------------------------------------------------- engine callbacks
@@ -202,6 +158,7 @@ static void SetupMIDI(void) {
 static void LogCallback(const char *msg) { os_log(gLog, "%{public}s", msg); }
 
 static void PresenceCallback(void *ctx, bool present) {
+    if (gRelayQ) RelaySendPresent(present);
     if (!gHost) return;
     if (!present) {
         // The HAL tears the device down; make sure the next StartIO after a

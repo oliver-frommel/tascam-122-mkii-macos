@@ -78,13 +78,13 @@ void US122EngineGetStats(US122Stats *out, bool resetMaxGap);
 // Test hook: kill the USB stream underneath the engine (watchdog should recover).
 void US122EngineDebugKillStream(void);
 
-// MIDI. The device only passes MIDI while its audio stream runs, so a MIDI
-// user should enable keep-alive: the engine then streams (silence) whenever
-// the device is connected, independent of Start/Stop.
+// MIDI. The device only passes MIDI while its audio stream runs (between
+// Start and Stop); bytes sent while stopped are queued until the next Start.
+// (Streaming on our own without host IO doesn't work inside Core Audio: the
+// driver helper process is throttled to background priority while idle.)
 typedef void (*US122MidiInCallback)(void *ctx, const uint8_t *bytes, size_t len); // raw MIDI byte stream
 void US122EngineSetMidiInCallback(US122MidiInCallback cb, void *ctx);
 void US122EngineMidiSend(const uint8_t *bytes, size_t len); // raw MIDI bytes, queued
-void US122EngineSetKeepAlive(bool on);
 
 #ifdef __cplusplus
 }

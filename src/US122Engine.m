@@ -59,7 +59,7 @@
 #define MIDI_PAYLOAD 8
 #define MIDI_PAD 0xFD
 #define MIDI_IN_REQS 2
-#define MIDI_FIFO 4096
+#define MIDI_FIFO (256 * 1024) // output queue: ~80 s at MIDI wire speed (power of two)
 #define BYTES_PER_FRAME 6
 #define UF_PER_REQ 8 // one 1 ms frame per request
 #define POOL 64           // request buffers per direction (covers long completion stalls)
@@ -100,7 +100,6 @@ static struct {
     _Atomic int live;       // capture data flowing in the current USB stream
     _Atomic int clockValid; // clock model usable (stays valid across automatic restarts)
     _Atomic int wantRunning;// host wants IO (set by Start, cleared by Stop)
-    _Atomic int keepAlive;  // keep streaming without host IO (MIDI only works while streaming)
     int depth, inSafetyMs;
 
     // watchdog / recovery
@@ -212,7 +211,7 @@ static void teardownLocked(void);
 static void primeDevice(void);
 static void midiStart(void);
 static void midiKick(void);
-static bool streamWanted(void) { return atomic_load(&E.wantRunning) || atomic_load(&E.keepAlive); }
+static bool streamWanted(void) { return atomic_load(&E.wantRunning); }
 
 // ---------------------------------------------------------------- matching / hot-plug
 
@@ -787,13 +786,15 @@ void US122EngineSetMidiInCallback(US122MidiInCallback cb, void *ctx) {
 }
 
 void US122EngineMidiSend(const uint8_t *bytes, size_t len) {
+    size_t dropped = 0;
     os_unfair_lock_lock(&E.midiLock);
     for (size_t i = 0; i < len; i++) {
-        if (E.midiHead - E.midiTail >= MIDI_FIFO) { E.midiDropped += len - i; break; }
+        if (E.midiHead - E.midiTail >= MIDI_FIFO) { dropped = len - i; E.midiDropped += dropped; break; }
         E.midiFifo[E.midiHead % MIDI_FIFO] = bytes[i];
         E.midiHead++;
     }
     os_unfair_lock_unlock(&E.midiLock);
+    if (dropped) elog("MIDI out queue full: dropped %zu bytes", dropped);
     dispatch_async(E.ioQ, ^{ midiKick(); });
 }
 
@@ -962,31 +963,12 @@ OSStatus US122EngineStart(uint32_t rate) {
 void US122EngineStop(void) {
     pthread_mutex_lock(&E.ctl);
     atomic_store(&E.wantRunning, 0);
-    if (atomic_load(&E.keepAlive) && atomic_load(&E.present) && E.intf) {
-        // host IO stopped, but MIDI needs the stream: keep it (sending silence)
-    } else {
-        if (E.intf) {
-            teardownLocked();
-            elog("stopped");
-        }
-        atomic_store(&E.clockValid, 0);
+    if (E.intf) {
+        teardownLocked();
+        elog("stopped");
     }
+    atomic_store(&E.clockValid, 0);
     pthread_mutex_unlock(&E.ctl);
-}
-
-void US122EngineSetKeepAlive(bool on) {
-    atomic_store(&E.keepAlive, on);
-    dispatch_async(E.ctlQ, ^{
-        pthread_mutex_lock(&E.ctl);
-        if (on && atomic_load(&E.present) && !E.intf) {
-            if (startLocked(E.rate ? E.rate : 48000, false) == kAudioHardwareNoError) elog("streaming for MIDI");
-        } else if (!on && !atomic_load(&E.wantRunning) && E.intf) {
-            teardownLocked();
-            atomic_store(&E.clockValid, 0);
-            elog("stopped");
-        }
-        pthread_mutex_unlock(&E.ctl);
-    });
 }
 
 // Watchdog (ctlQ, every 200 ms): if the host wants IO but no capture data has
@@ -1021,9 +1003,6 @@ static void watchdogTick(void) {
     pthread_mutex_unlock(&E.ctl);
 }
 
-// After power-up the US-122MKII puts out a loud sweeping noise until it has
-// received its first audio stream; afterwards it stays quiet even when idle.
-// So on every connect, stream a moment of silence unless IO is already wanted.
 // After power-up the US-122MKII puts out a loud sweeping noise until it is
 // configured. Selecting the streaming alt setting and setting the sample rate
 // is enough (no audio stream needed), and takes a few ms, so do it right on

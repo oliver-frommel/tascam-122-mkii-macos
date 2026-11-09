@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>US122MIDI</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.us122mkii.midi</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>US122MIDI</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFPlugInDynamicRegistration</key>
+	<string>NO</string>
+	<key>CFPlugInFactories</key>
+	<dict>
+		<key>2E2CB236-4E42-425D-B600-66E87E31AF65</key>
+		<string>US122MIDI_Create</string>
+	</dict>
+	<key>CFPlugInTypes</key>
+	<dict>
+		<key>ECDE9574-0FE4-11D4-BB1A-0050E4CEA526</key>
+		<array>
+			<string>2E2CB236-4E42-425D-B600-66E87E31AF65</string>
+		</array>
+	</dict>
+</dict>
+</plist>

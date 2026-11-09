@@ -34,8 +34,7 @@
 	</dict>
 	<key>AudioServerPlugIn_MachServices</key>
 	<array>
-		<string>com.apple.midiserver</string>
-		<string>com.apple.midiserver.io</string>
+		<string>local.us122mkii.midirelay</string>
 	</array>
 	<key>AudioServerPlugIn_IOKitUserClients</key>
 	<array>

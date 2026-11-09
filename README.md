@@ -26,6 +26,7 @@ protocol reference only:
 | Capture | EP `0x81` isochronous IN |
 | Format | 2 ch, 24-bit LE packed, 6 bytes/frame |
 | Timing | high-speed, one packet per 125 µs microframe (6 frames at 48 kHz), no feedback endpoint |
+| MIDI | EP `0x83` bulk IN / `0x04` bulk OUT, 9-byte packets padded with `0xFD`; OUT packets end in `0xE0` and carry at most 4 MIDI bytes (found by loopback test). Only works while the audio stream runs |
 
 ## Layout
 
@@ -37,6 +38,27 @@ protocol reference only:
 | `tools/us122ctl.m` | low-level protocol test (descriptors, raw streaming) |
 | `tools/enginetest.m` | drives the engine like the HAL would, without coreaudiod |
 | `tools/haltest.m` | plays/records through the installed Core Audio device |
+| `midi/US122MIDIDriver.c` | CoreMIDI driver (MIDI device "US-122MKII", loaded by MIDIServer) |
+| `midi/relay.c` | `us122-midirelay` launchd daemon joining the audio plug-in and the MIDI driver |
+| `tools/midiloop.c` | end-to-end MIDI loopback test through CoreMIDI |
+
+### MIDI
+
+Core Audio's sandbox doesn't allow the audio plug-in (which owns the USB
+device) to use CoreMIDI, and the CoreMIDI driver can't reach the device. Both
+can reach a system-wide Mach service, so a small launchd daemon
+(`us122-midirelay`, running as `nobody`) passes MIDI bytes between them. It
+accepts the audio side only from `_coreaudiod` and the MIDI side only from
+Apple's `MIDIServer`.
+
+The device only passes MIDI while its audio stream runs, and the audio plug-in
+can only stream reliably while Core Audio does IO on it: otherwise macOS
+throttles its helper process to background priority. So while MIDI is in use
+(an app listens to MIDI IN, or for 30 s after MIDI output) the MIDI driver runs
+a silent Core Audio stream on the device, like any audio app would.
+
+macOS sends a MIDI-CI discovery sysex (`F0 7E 7F 0D 70 …`) to the MIDI OUT
+when a port is first used; MIDI gear ignores it.
 
 ## Clocking
 
@@ -78,7 +100,7 @@ earlier.
 
 ```sh
 make                    # builds tools + build/US122MKII.driver
-sudo make install       # copies to /Library/Audio/Plug-Ins/HAL, restarts coreaudiod
+sudo make install       # audio plug-in, MIDI driver and relay daemon; restarts coreaudiod and MIDIServer
 sudo make uninstall
 ```
 
@@ -106,11 +128,9 @@ and real-time wake-up jitter.
 - [ ] Lower latency: limited by kernel enqueue stalls (see above); 16 ms output lead
 - [x] Silences the device's power-up noise: configures it (alt setting +
       rate) within a few ms of connect
-- [ ] MIDI: device transport verified by loopback (MIDI OUT cabled to MIDI
-      IN, `enginetest --midi`): note messages and 1500-byte bursts arrive
-      intact. The device transmits only the first 4 bytes of each OUT packet.
-      Not yet visible to apps: the Core Audio helper's sandbox refuses CoreMIDI
-      clients (-10833), so the ports need a relay outside the sandbox.
+- [x] MIDI IN/OUT as a CoreMIDI device, verified by loopback (MIDI OUT cabled
+      to MIDI IN, `build/midiloop`): notes and large sysex arrive intact,
+      ~3 ms round trip
 
 ## License
 
